@@ -44,6 +44,7 @@ async function connectToWhatsApp() {
     },
     printQRInTerminal: false,
     browser: ['Habibi', 'Chrome', '120.0.0'],
+    version: [2, 3000, 1025190524],
     connectTimeoutMs: 60000,
     retryRequestDelayMs: 2000
   })
