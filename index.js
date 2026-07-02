@@ -8,20 +8,24 @@ import makeWASocket, {
 import pino from 'pino'
 import { Boom } from '@hapi/boom'
 
-import { useSupabaseAuthState, registerGroup, isGroupRegistered, upsertMember, incrementMessages } from './lib/supabase.js'
+import {
+  useSupabaseAuthState, registerGroup, isGroupRegistered,
+  upsertMember, incrementMessages
+} from './lib/supabase.js'
 import { getAIReply } from './lib/ai.js'
-import { spacedText, handleBalance, handleTop, handleGive, handleSteal, handleRob } from './lib/economy.js'
+import { handleBalance, handleTop, handleGive, handleSteal, handleRob } from './lib/economy.js'
 
-const PREFIX_CMD  = '.'
-const PREFIX_MSG  = '🦩'
-const SIGN        = '₹'
-const DIAMOND     = '♦'
+const PREFIX_CMD    = '.'
+const PREFIX_MSG    = '🦩'
+const SIGN          = '₹'
+const DIAMOND       = '♦'
 const TRIGGER_WORDS = ['habibi', 'habs', 'bibi']
-const PHONE       = process.env.PHONE_NUMBER // e.g. 2348012345678
+const PHONE         = process.env.PHONE_NUMBER
 
 const logger = pino({ level: 'silent' })
 
-// Spaced pulse text
+let pairingRequested = false
+
 function pulseText(ms) {
   const label = `H a b i b i ' s  P u l s e :  ${ms}  m s`
   return `${PREFIX_MSG}\n\n${DIAMOND}\n${label}\n${DIAMOND}`
@@ -39,32 +43,49 @@ async function connectToWhatsApp() {
       keys: makeCacheableSignalKeyStore(state.keys, logger)
     },
     printQRInTerminal: false,
-    browser: ['Habibi', 'Chrome', '120.0.0']
+    browser: ['Habibi', 'Chrome', '120.0.0'],
+    connectTimeoutMs: 60000,
+    retryRequestDelayMs: 2000
   })
 
-  // ── Pairing code ─────────────────────────────────────────────────────────
-  if (!state.creds.registered) {
-    const code = await sock.requestPairingCode(PHONE)
-    console.log(`\n==========================================`)
-    console.log(`  HABIBI PAIRING CODE: ${code}`)
-    console.log(`  Enter this in WhatsApp:`)
-    console.log(`  Settings > Linked Devices > Link a Device`)
-    console.log(`==========================================\n`)
-  }
-
   // ── Connection updates ────────────────────────────────────────────────────
-  sock.ev.on('connection.update', async ({ connection, lastDisconnect }) => {
+  sock.ev.on('connection.update', async ({ connection, lastDisconnect, isNewLogin }) => {
+    if (connection === 'connecting') {
+      console.log('🦩 Connecting to WhatsApp...')
+
+      // Request pairing code once after short delay to let WS stabilise
+      if (!state.creds.registered && !pairingRequested) {
+        pairingRequested = true
+        await new Promise(r => setTimeout(r, 3000))
+        try {
+          const code = await sock.requestPairingCode(PHONE)
+          console.log(`\n==========================================`)
+          console.log(`  HABIBI PAIRING CODE: ${code}`)
+          console.log(`  Go to WhatsApp > Settings > Linked Devices`)
+          console.log(`  > Link a Device > Link with phone number`)
+          console.log(`==========================================\n`)
+        } catch (e) {
+          console.error('Pairing code error:', e.message)
+          pairingRequested = false
+        }
+      }
+    }
+
+    if (connection === 'open') {
+      console.log(`${PREFIX_MSG} Habibi is LIVE on WhatsApp 💕`)
+    }
+
     if (connection === 'close') {
       const reason = new Boom(lastDisconnect?.error)?.output?.statusCode
-      console.log(`Connection closed: ${reason}`)
-      if (reason !== DisconnectReason.loggedOut) {
-        console.log('Reconnecting...')
-        connectToWhatsApp()
+      console.log(`Connection closed — reason: ${reason}`)
+
+      if (reason === DisconnectReason.loggedOut) {
+        console.log('Logged out. Clear wa_session in Supabase and redeploy.')
       } else {
-        console.log('Logged out. Clear session in Supabase and restart.')
+        console.log('Reconnecting in 5s...')
+        pairingRequested = false
+        setTimeout(connectToWhatsApp, 5000)
       }
-    } else if (connection === 'open') {
-      console.log(`${PREFIX_MSG} Habibi is live on WhatsApp 💕`)
     }
   })
 
@@ -77,12 +98,13 @@ async function connectToWhatsApp() {
     for (const msg of messages) {
       if (!msg.message || msg.key.fromMe) continue
 
-      const isGroup  = msg.key.remoteJid.endsWith('@g.us')
+      const isGroup  = msg.key.remoteJid?.endsWith('@g.us')
       const groupId  = isGroup ? msg.key.remoteJid : null
       const senderId = isGroup ? msg.key.participant : msg.key.remoteJid
+      if (!senderId) continue
       const waId     = jidNormalizedUser(senderId)
+      const replyTo  = isGroup ? groupId : msg.key.remoteJid
 
-      // Extract text
       const text = (
         msg.message?.conversation ||
         msg.message?.extendedTextMessage?.text ||
@@ -92,20 +114,13 @@ async function connectToWhatsApp() {
 
       if (!text) continue
 
-      // Sender name
       const pushName = msg.pushName || waId.split('@')[0]
 
-      // Only handle group messages from registered group
       if (isGroup) {
         const registered = await isGroupRegistered(groupId)
-
-        // Allow .start even before registration
         if (!registered && !text.startsWith(`${PREFIX_CMD}start`)) continue
-
-        // Track member
         await upsertMember(waId, groupId, pushName)
 
-        // Count message + level up check
         if (registered && !text.startsWith(PREFIX_CMD)) {
           const result = await incrementMessages(waId, groupId)
           if (result?.leveledUp) {
@@ -114,7 +129,7 @@ async function connectToWhatsApp() {
                 `${PREFIX_MSG}\n\n` +
                 `${DIAMOND} Level Up! ${DIAMOND}\n\n` +
                 `@${pushName} just hit *Level ${result.newLevel}* 🎉\n` +
-                `${SIGN}10,000 BibzDollar added to your balance 💰\n` +
+                `${SIGN}10,000 BibzDollar added!\n` +
                 `New balance: ${SIGN}${result.newBalance.toLocaleString()}`
               ),
               mentions: [waId]
@@ -123,17 +138,15 @@ async function connectToWhatsApp() {
         }
       }
 
-      // ── Command handling ──────────────────────────────────────────────────
+      // ── Commands ──────────────────────────────────────────────────────────
       if (text.startsWith(PREFIX_CMD)) {
-        const [rawCmd, ...args] = text.slice(1).trim().split(/\s+/)
-        const cmd = rawCmd.toLowerCase()
+        const parts  = text.slice(1).trim().split(/\s+/)
+        const cmd    = parts[0].toLowerCase()
+        const args   = parts.slice(1)
 
-        // .start
         if (cmd === 'start') {
           if (!isGroup) {
-            await sock.sendMessage(msg.key.remoteJid, {
-              text: `${PREFIX_MSG} This command only works in a group, darling 💅`
-            })
+            await sock.sendMessage(replyTo, { text: `${PREFIX_MSG} This only works in a group, darling 💅` })
             continue
           }
           await registerGroup(groupId)
@@ -142,75 +155,68 @@ async function connectToWhatsApp() {
             text: (
               `${PREFIX_MSG}\n\n` +
               `${DIAMOND} Habibi is here! ${DIAMOND}\n\n` +
-              `Hey everyone 💕 I'm Habibi — your group's new favorite girl.\n` +
+              `Hey everyone 💕 I'm Habibi — your group's new favourite girl.\n` +
               `Talk to me, play with BibzDollar, and vibe.\n\n` +
-              `Type *.help* to see what I can do~ ✨`
+              `Type *.help* to see what I can do ✨`
             )
           })
           continue
         }
 
-        // Block all commands if group not registered
         if (isGroup && !(await isGroupRegistered(groupId))) continue
 
-        // .help
         if (cmd === 'help') {
-          await sock.sendMessage(isGroup ? groupId : msg.key.remoteJid, {
+          await sock.sendMessage(replyTo, {
             text: (
               `${PREFIX_MSG}\n\n` +
               `${DIAMOND} *Habibi's Commands* ${DIAMOND}\n\n` +
               `*.start* — register the group\n` +
               `*.help* — this menu\n` +
               `*.pulse* — check my speed\n` +
-              `*.ship* — check your compatibility\n\n` +
+              `*.ship @user* — compatibility check\n\n` +
               `${DIAMOND} *BibzDollar Economy*\n` +
               `*.balance* — check your ${SIGN}\n` +
               `*.top* — top 10 richest\n` +
               `*.give <amount> @user* — send ${SIGN}\n` +
-              `*.steal <amount> @user* — try to steal ${SIGN}\n` +
-              `*.rob @user* — try to take everything\n\n` +
-              `_Earn ${SIGN}10,000 every 1,000 messages — keep chatting 💬_`
+              `*.steal <amount> @user* — 50/50 chance\n` +
+              `*.rob @user* — 40% chance, all or nothing\n\n` +
+              `_Earn ${SIGN}10,000 every 1,000 messages 💬_`
             )
           })
           continue
         }
 
-        // .pulse
         if (cmd === 'pulse') {
           const start   = Date.now()
-          const sent    = await sock.sendMessage(isGroup ? groupId : msg.key.remoteJid, { text: '...' })
+          const sent    = await sock.sendMessage(replyTo, { text: '...' })
           const latency = Date.now() - start
-          await sock.sendMessage(isGroup ? groupId : msg.key.remoteJid, {
+          await sock.sendMessage(replyTo, {
             text: pulseText(latency),
             edit: sent.key
           })
           continue
         }
 
-        // .ship
         if (cmd === 'ship') {
           const mentioned = msg.message?.extendedTextMessage?.contextInfo?.mentionedJid || []
-          const partner   = mentioned[0] ? jidNormalizedUser(mentioned[0]) : null
-          const partnerName = partner ? partner.split('@')[0] : args[0]?.replace('@', '')
+          const partnerJid = mentioned[0] ? jidNormalizedUser(mentioned[0]) : null
+          const partnerName = partnerJid ? partnerJid.split('@')[0] : args[0]?.replace('@', '')
 
           if (!partnerName) {
-            await sock.sendMessage(isGroup ? groupId : msg.key.remoteJid, {
-              text: `${PREFIX_MSG} Tag someone to ship with, love 💕 e.g. .ship @user`
-            })
+            await sock.sendMessage(replyTo, { text: `${PREFIX_MSG} Tag someone to ship with 💕 e.g. .ship @user` })
             continue
           }
 
-          const score      = Math.floor(Math.random() * 90) + 10
-          const bar_filled = Math.round(score / 10)
-          const bar        = '💗'.repeat(bar_filled) + '🤍'.repeat(10 - bar_filled)
-
+          const score       = Math.floor(Math.random() * 90) + 10
+          const bar_filled  = Math.round(score / 10)
+          const bar         = '💗'.repeat(bar_filled) + '🤍'.repeat(10 - bar_filled)
           let verdict
           if (score >= 80)      verdict = 'SOULMATES omg 😍 The universe said yes'
-          else if (score >= 60) verdict = 'There\'s something there... 💕'
+          else if (score >= 60) verdict = "There's something there... 💕"
           else if (score >= 40) verdict = 'Complicated but make it cute 😅'
           else                  verdict = 'Maybe just be friends? 💀'
 
-          await sock.sendMessage(isGroup ? groupId : msg.key.remoteJid, {
+          await sock.sendMessage(replyTo, {
             text: (
               `${PREFIX_MSG}\n\n` +
               `${DIAMOND} *Ship Report* ${DIAMOND}\n\n` +
@@ -219,12 +225,11 @@ async function connectToWhatsApp() {
               `*${score}% compatible*\n\n` +
               `${verdict}`
             ),
-            mentions: partner ? [partner] : []
+            mentions: partnerJid ? [partnerJid] : []
           })
           continue
         }
 
-        // .balance
         if (cmd === 'balance') {
           if (!isGroup) continue
           const reply = await handleBalance(waId, groupId, pushName)
@@ -232,7 +237,6 @@ async function connectToWhatsApp() {
           continue
         }
 
-        // .top
         if (cmd === 'top') {
           if (!isGroup) continue
           const reply = await handleTop(groupId)
@@ -240,17 +244,13 @@ async function connectToWhatsApp() {
           continue
         }
 
-        // .give <amount> @user
         if (cmd === 'give') {
           if (!isGroup) continue
-          const amount    = parseInt(args[0])
-          const mentioned = msg.message?.extendedTextMessage?.contextInfo?.mentionedJid || []
-          const targetJid = mentioned[0] ? jidNormalizedUser(mentioned[0]) : null
-
+          const amount     = parseInt(args[0])
+          const mentioned  = msg.message?.extendedTextMessage?.contextInfo?.mentionedJid || []
+          const targetJid  = mentioned[0] ? jidNormalizedUser(mentioned[0]) : null
           if (!targetJid || isNaN(amount)) {
-            await sock.sendMessage(groupId, {
-              text: `${PREFIX_MSG} Usage: .give <amount> @user 💸`
-            })
+            await sock.sendMessage(groupId, { text: `${PREFIX_MSG} Usage: .give <amount> @user 💸` })
             continue
           }
           const targetName = targetJid.split('@')[0]
@@ -260,17 +260,13 @@ async function connectToWhatsApp() {
           continue
         }
 
-        // .steal <amount> @user
         if (cmd === 'steal') {
           if (!isGroup) continue
           const amount    = parseInt(args[0])
           const mentioned = msg.message?.extendedTextMessage?.contextInfo?.mentionedJid || []
           const targetJid = mentioned[0] ? jidNormalizedUser(mentioned[0]) : null
-
           if (!targetJid || isNaN(amount)) {
-            await sock.sendMessage(groupId, {
-              text: `${PREFIX_MSG} Usage: .steal <amount> @user 😈`
-            })
+            await sock.sendMessage(groupId, { text: `${PREFIX_MSG} Usage: .steal <amount> @user 😈` })
             continue
           }
           const targetName = targetJid.split('@')[0]
@@ -280,16 +276,12 @@ async function connectToWhatsApp() {
           continue
         }
 
-        // .rob @user
         if (cmd === 'rob') {
           if (!isGroup) continue
           const mentioned = msg.message?.extendedTextMessage?.contextInfo?.mentionedJid || []
           const targetJid = mentioned[0] ? jidNormalizedUser(mentioned[0]) : null
-
           if (!targetJid) {
-            await sock.sendMessage(groupId, {
-              text: `${PREFIX_MSG} Tag someone to rob, babe 😈 e.g. .rob @user`
-            })
+            await sock.sendMessage(groupId, { text: `${PREFIX_MSG} Tag someone to rob 😈 e.g. .rob @user` })
             continue
           }
           const targetName = targetJid.split('@')[0]
@@ -298,24 +290,29 @@ async function connectToWhatsApp() {
           await sock.sendMessage(groupId, { text: reply, mentions: [targetJid] })
           continue
         }
+
+        continue
       }
 
-      // ── Trigger word / AI reply ─────────────────────────────────────────
+      // ── Trigger word / AI reply ───────────────────────────────────────────
       if (isGroup && !(await isGroupRegistered(groupId))) continue
 
-      const lower         = text.toLowerCase()
-      const isMentioned   = msg.message?.extendedTextMessage?.contextInfo?.mentionedJid?.some(
-        jid => jidNormalizedUser(jid) === jidNormalizedUser(sock.user.id)
+      const lower       = text.toLowerCase()
+      const isMentioned = msg.message?.extendedTextMessage?.contextInfo?.mentionedJid?.some(
+        jid => jidNormalizedUser(jid) === jidNormalizedUser(sock.user?.id || '')
       )
-      const isReply       = msg.message?.extendedTextMessage?.contextInfo?.quotedMessage
-      const hasTrigger    = TRIGGER_WORDS.some(w => lower.includes(w))
+      const hasTrigger = TRIGGER_WORDS.some(w => lower.includes(w))
 
-      if (!isGroup || isMentioned || hasTrigger) {
-        const reply = await getAIReply(waId, text)
-        await sock.sendMessage(isGroup ? groupId : msg.key.remoteJid, {
-          text: reply,
-          ...(isGroup && { mentions: [waId] })
-        })
+      if (isMentioned || hasTrigger || !isGroup) {
+        try {
+          const reply = await getAIReply(waId, text)
+          await sock.sendMessage(replyTo, {
+            text: reply,
+            mentions: isGroup ? [waId] : []
+          })
+        } catch (e) {
+          console.error('AI reply error:', e.message)
+        }
       }
     }
   })
