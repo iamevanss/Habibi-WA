@@ -78,8 +78,15 @@ async function connectToWhatsApp() {
       const reason = new Boom(lastDisconnect?.error)?.output?.statusCode
       console.log(`Connection closed — reason: ${reason}`)
 
-      if (reason === DisconnectReason.loggedOut) {
-        console.log('Logged out. Clear wa_session in Supabase and redeploy.')
+      if (reason === DisconnectReason.loggedOut || reason === 401) {
+        console.log('Session invalid — clearing and restarting fresh...')
+        // Auto-clear stale session keys from Supabase
+        const { createClient } = await import('@supabase/supabase-js')
+        const sb = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY)
+        await sb.from('wa_session').delete().neq('key', 'KEEPALL')
+        pairingRequested = false
+        console.log('Session cleared. Reconnecting in 5s...')
+        setTimeout(connectToWhatsApp, 5000)
       } else {
         console.log('Reconnecting in 5s...')
         pairingRequested = false
