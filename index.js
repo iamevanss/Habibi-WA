@@ -44,7 +44,6 @@ async function connectToWhatsApp() {
     },
     printQRInTerminal: false,
     browser: ['Habibi', 'Chrome', '120.0.0'],
-    version: [2, 3000, 1025190524],
     connectTimeoutMs: 60000,
     retryRequestDelayMs: 2000
   })
@@ -53,16 +52,19 @@ async function connectToWhatsApp() {
   sock.ev.on('connection.update', async ({ connection, lastDisconnect, isNewLogin }) => {
     if (connection === 'connecting') {
       console.log('🦩 Connecting to WhatsApp...')
+    }
 
-      // Request pairing code once after short delay to let WS stabilise
+    if (connection === 'open') {
+      console.log(`${PREFIX_MSG} Habibi is LIVE on WhatsApp 💕`)
+
+      // Request pairing code only after connection is fully open
       if (!state.creds.registered && !pairingRequested) {
         pairingRequested = true
-        await new Promise(r => setTimeout(r, 3000))
         try {
           const code = await sock.requestPairingCode(PHONE)
           console.log(`\n==========================================`)
           console.log(`  HABIBI PAIRING CODE: ${code}`)
-          console.log(`  Go to WhatsApp > Settings > Linked Devices`)
+          console.log(`  WhatsApp > Settings > Linked Devices`)
           console.log(`  > Link a Device > Link with phone number`)
           console.log(`==========================================\n`)
         } catch (e) {
@@ -70,10 +72,6 @@ async function connectToWhatsApp() {
           pairingRequested = false
         }
       }
-    }
-
-    if (connection === 'open') {
-      console.log(`${PREFIX_MSG} Habibi is LIVE on WhatsApp 💕`)
     }
 
     if (connection === 'close') {
