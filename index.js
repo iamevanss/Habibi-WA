@@ -26,6 +26,7 @@ const PHONE         = process.env.PHONE_NUMBER
 const logger = pino({ level: 'silent' })
 
 let pairingRequested = false
+let reconnectDelay = 5000
 
 function pulseText(ms) {
   const label = `H a b i b i ' s  P u l s e :  ${ms}  m s`
@@ -85,11 +86,15 @@ async function connectToWhatsApp() {
 
     if (connection === 'open') {
       console.log(`${PREFIX_MSG} Habibi is LIVE on WhatsApp 💕`)
+      reconnectDelay = 5000
     }
 
     if (connection === 'close') {
       const reason = new Boom(lastDisconnect?.error)?.output?.statusCode
       console.log(`Connection closed — reason: ${reason}`)
+
+      const delay = reconnectDelay
+      reconnectDelay = Math.min(reconnectDelay * 2, 60000)
 
       if (reason === DisconnectReason.loggedOut || reason === 401) {
         console.log('Session invalid — clearing and restarting fresh...')
@@ -98,12 +103,12 @@ async function connectToWhatsApp() {
         const sb = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY)
         await sb.from('wa_session').delete().neq('key', 'KEEPALL')
         pairingRequested = false
-        console.log('Session cleared. Reconnecting in 5s...')
-        setTimeout(connectToWhatsApp, 5000)
+        console.log(`Session cleared. Reconnecting in ${delay / 1000}s...`)
+        setTimeout(connectToWhatsApp, delay)
       } else {
-        console.log('Reconnecting in 5s...')
+        console.log(`Reconnecting in ${delay / 1000}s...`)
         pairingRequested = false
-        setTimeout(connectToWhatsApp, 5000)
+        setTimeout(connectToWhatsApp, delay)
       }
     }
   })
