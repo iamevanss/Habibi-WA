@@ -3,7 +3,8 @@ import makeWASocket, {
   DisconnectReason,
   fetchLatestBaileysVersion,
   makeCacheableSignalKeyStore,
-  jidNormalizedUser
+  jidNormalizedUser,
+  Browsers
 } from '@whiskeysockets/baileys'
 import pino from 'pino'
 import { Boom } from '@hapi/boom'
@@ -43,24 +44,29 @@ async function connectToWhatsApp() {
       keys: makeCacheableSignalKeyStore(state.keys, logger)
     },
     printQRInTerminal: false,
-    browser: ['Habibi', 'Chrome', '120.0.0'],
+    browser: Browsers.ubuntu('Chrome'),
     connectTimeoutMs: 60000,
     retryRequestDelayMs: 2000
   })
 
   // ── Connection updates ────────────────────────────────────────────────────
-  sock.ev.on('connection.update', async ({ connection, lastDisconnect, isNewLogin }) => {
+  sock.ev.on('connection.update', async ({ connection, lastDisconnect, qr }) => {
     if (connection === 'connecting') {
       console.log('🦩 Connecting to WhatsApp...')
     }
 
-    if (connection === 'open') {
-      console.log(`${PREFIX_MSG} Habibi is LIVE on WhatsApp 💕`)
+    // Request the pairing code while the socket is still connecting — 'open'
+    // only ever fires AFTER a session is authenticated, so a fresh/unregistered
+    // bot never reaches 'open' on its own. Gating the request behind 'open'
+    // (as this used to) meant it could never actually fire for a new login.
+    if ((connection === 'connecting' || qr) && !state.creds.registered && !pairingRequested) {
+      pairingRequested = true
 
-      // Request pairing code only after connection is fully open
-      if (!state.creds.registered && !pairingRequested) {
-        pairingRequested = true
+      if (!PHONE) {
+        console.error('⚠️  No saved session (SESSION_ID) and no PHONE_NUMBER set — cannot pair. Set one of the two.')
+      } else {
         try {
+          console.log('🦩 No saved session — requesting pairing code from WhatsApp...')
           const code = await sock.requestPairingCode(PHONE)
           console.log(`\n==========================================`)
           console.log(`  HABIBI PAIRING CODE: ${code}`)
@@ -69,9 +75,16 @@ async function connectToWhatsApp() {
           console.log(`==========================================\n`)
         } catch (e) {
           console.error('Pairing code error:', e.message)
+          console.error('⚠️  If this is a timeout, 401, or 429 ("rate-overlimit"), that\'s WhatsApp')
+          console.error('    rate-limiting/blocking Railway\'s datacenter IP — not a bug in the bot.')
+          console.error('    Generate a session elsewhere and set it as SESSION_ID instead (see README).')
           pairingRequested = false
         }
       }
+    }
+
+    if (connection === 'open') {
+      console.log(`${PREFIX_MSG} Habibi is LIVE on WhatsApp 💕`)
     }
 
     if (connection === 'close') {
