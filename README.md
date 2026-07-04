@@ -54,7 +54,7 @@ The longer your members chat, the richer they get. Then chaos begins.
 
 ### 1. clone and install
 ```bash
-git clone https://github.com/yourrepo/habibi-wa
+git clone https://github.com/iamevanss/Habibi-WA.git
 cd habibi-wa
 npm install
 ```
