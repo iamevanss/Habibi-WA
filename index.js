@@ -306,7 +306,7 @@ async function connectToWhatsApp() {
               text: (
                 `${PREFIX_MSG}\n\n${DIAMOND} Level Up! ${DIAMOND}\n\n` +
                 `@${pushName} just hit *Level ${result.newLevel}* 🎉\n` +
-                `${SIGN}10,000 BibzDollar added!\n` +
+                `${SIGN}${result.bonusAdded.toLocaleString()} BibzDollar added!\n` +
                 `New balance: ${SIGN}${result.newBalance.toLocaleString()}`
               ),
               mentions: [waId]
@@ -325,7 +325,7 @@ async function connectToWhatsApp() {
           await registerGroup(groupId)
           await upsertMember(waId, groupId, pushName)
           await sock.sendMessage(groupId, {
-            text: `${PREFIX_MSG}\n\n${DIAMOND} Habibi is here! ${DIAMOND}\n\nHey everyone 💕 I'm Habibi — your group's new favourite girl.\nType *.help* to see what I can do ✨`
+            text: `${PREFIX_MSG} *Habibi is Live* 🦩`
           })
           continue
         }
@@ -340,7 +340,7 @@ async function connectToWhatsApp() {
               `${DIAMOND} *BibzDollar Economy*\n` +
               `*.balance* — check your ${SIGN}\n*.top* — top 10 richest\n` +
               `*.give <amount> @user* — send ${SIGN}\n*.steal <amount> @user* — 50/50\n*.rob @user* — 40%, all or nothing\n\n` +
-              `_Earn ${SIGN}10,000 every 1,000 messages 💬_`
+              `_Earn ${SIGN}10,000 every 200 messages 💬_`
             )
           })
           continue
